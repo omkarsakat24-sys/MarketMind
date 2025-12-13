@@ -302,45 +302,105 @@ with tab3:
                 )
             else:
                 st.warning("No Stage 2 Breakouts found.")
-
-# --- TAB 4: HYPE METER ---
+# --- TAB 4: HYPE METER (Weekend Proof) ---
 with tab4:
-    st.subheader("The Hype Meter")
-    hype_tickers = st.text_area(
-        "Watchlist:", "SUZLON.NS, ZOMATO.NS, PAYTM.NS, IEX.NS, TRIDENT.NS"
+    st.subheader("The Hype Meter: Retail Euphoria Tracker")
+    st.markdown("Scan for abnormal volume. High Volume + No Price Move = **Trap**.")
+
+    # 1. THE SLIDER
+    sensitivity = st.slider(
+        "Volume Sensitivity (Multiplier):",
+        min_value=0.5,
+        max_value=5.0,
+        value=1.5,
+        step=0.5,
     )
+    st.caption(f"🔍 Scanning for stocks with Volume > {sensitivity}x of average.")
+
+    # 2. THE INPUT BOX
+    hype_tickers = st.text_area(
+        "Watchlist (Add .NS for NSE):",
+        "ADANIENT.NS, ADANIGREEN.NS, SUZLON.NS, IREDA.NS, JIOFIN.NS, ZOMATO.NS, HUDCO.NS, RVNL.NS",
+    )
+
+    # 3. THE SCANNER LOGIC
     if st.button("Scan for Hype"):
         hype_list = [x.strip() for x in hype_tickers.split(",")]
-        with st.spinner("Scanning..."):
+        with st.spinner(f"Analyzing Volume Data..."):
             data = get_stock_data(hype_list, period="1mo", interval="1d")
             hype_results = []
+
             for ticker in hype_list:
                 try:
                     df = data[ticker].copy()
-                    if len(df) < 20:
+                    if len(df) < 5:
                         continue
-                    hype_factor = df["Volume"].iloc[-1] / df["Volume"].mean()
-                    if hype_factor > 3:
-                        status = "🔥 EXTREME" if hype_factor > 5 else "⚠️ HIGH"
+
+                    # --- WEEKEND FIX START ---
+                    # Check if the last row (Latest) has 0 volume (Common weekend bug)
+                    last_vol = df["Volume"].iloc[-1]
+
+                    if last_vol == 0 or np.isnan(last_vol):
+                        # Use Friday's data instead
+                        curr_vol = df["Volume"].iloc[-2]
+                        curr_close = df["Close"].iloc[-2]
+                        curr_open = df["Open"].iloc[-2]
+                        data_date = df.index[-2].strftime("%Y-%m-%d")
+                    else:
+                        # Use Today's data
+                        curr_vol = last_vol
+                        curr_close = df["Close"].iloc[-1]
+                        curr_open = df["Open"].iloc[-1]
+                        data_date = df.index[-1].strftime("%Y-%m-%d")
+                    # --- WEEKEND FIX END ---
+
+                    avg_vol = df["Volume"].mean()
+                    hype_factor = curr_vol / avg_vol
+
+                    # FILTER
+                    if hype_factor > sensitivity:
+                        status = (
+                            "🔥 EXTREME"
+                            if hype_factor > 5
+                            else "⚠️ HIGH" if hype_factor > 3 else "👀 ACTIVE"
+                        )
+                        price_change = ((curr_close - curr_open) / curr_open) * 100
+
                         hype_results.append(
                             [
                                 ticker,
-                                df["Close"].iloc[-1],
+                                f"{curr_close:.2f}",
                                 f"{hype_factor:.1f}x",
+                                f"{price_change:.2f}%",
                                 status,
+                                data_date,
                             ]
                         )
                 except Exception:
                     continue
+
+            # 4. DISPLAY RESULTS
             if hype_results:
                 st.dataframe(
                     pd.DataFrame(
                         hype_results,
-                        columns=["Stock", "Price", "Volume Spike", "Intensity"],
+                        columns=[
+                            "Stock",
+                            "Price",
+                            "Vol Spike",
+                            "Change %",
+                            "Intensity",
+                            "Date",
+                        ],
                     )
                 )
+                st.info(
+                    "💡 **Note:** 'Date' shows you exactly which trading day was analyzed."
+                )
             else:
-                st.success("No volume spikes detected.")
+                st.warning(
+                    f"No spikes found above {sensitivity}x. (Try lowering the slider to 0.5x to verify data is loading)."
+                )
 
 # --- TAB 5: LIVE NEWS ---
 # --- TAB 5: LIVE NEWS (Search Anything) ---
