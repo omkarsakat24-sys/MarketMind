@@ -343,33 +343,49 @@ with tab4:
                 st.success("No volume spikes detected.")
 
 # --- TAB 5: LIVE NEWS ---
+# --- TAB 5: LIVE NEWS (Search Anything) ---
+# --- TAB 5: LIVE NEWS (Search Anything) ---
 with tab5:
     st.header("📰 The Market Narrative")
-    col1, col2 = st.columns([2, 1])
+    st.markdown(
+        "Context Check: Search for the specific stock you found in the scanner."
+    )
+
+    col1, col2 = st.columns([3, 1])
+
     with col1:
-        news_topic = st.selectbox(
-            "Topic:",
-            ["Indian Stock Market", "Nifty 50", "Bank Nifty", "Adani Group", "SME IPO"],
+        # UPGRADE: Changed from 'selectbox' to 'text_input' so you can type anything
+        # We set a default value to "Indian Stock Market"
+        news_topic = st.text_input(
+            "Search News (Type Stock Name):", "Indian Stock Market"
         )
+
     with col2:
         st.write("")
         st.write("")
-        if st.button("📢 Fetch Headlines", type="primary", use_container_width=True):
+        if st.button("📢 Fetch News", type="primary", use_container_width=True):
             st.session_state["fetch_news"] = True
+
     st.divider()
+
     try:
-        with st.spinner(f"Searching news for '{news_topic}'..."):
-            news_items = fetch_market_news(news_topic)
-            if not news_items:
-                st.warning("No news found.")
-            for item in news_items:
-                pub_time = (
-                    item.published.replace("+0530", "")
-                    if hasattr(item, "published")
-                    else ""
-                )
-                with st.expander(f"📄 {item.title}"):
-                    st.caption(f"🕒 {pub_time}")
-                    st.markdown(f"**[Read Story]({item.link})**")
+        if news_topic:
+            with st.spinner(f"Searching Google News for '{news_topic}'..."):
+                news_items = fetch_market_news(news_topic)
+
+                if not news_items:
+                    st.warning(
+                        f"No recent news found for '{news_topic}'. Try typing the full company name."
+                    )
+
+                for item in news_items:
+                    pub_time = (
+                        item.published.replace("+0530", "")
+                        if hasattr(item, "published")
+                        else ""
+                    )
+                    with st.expander(f"📄 {item.title}"):
+                        st.caption(f"🕒 {pub_time}")
+                        st.markdown(f"**[Read Full Story]({item.link})**")
     except Exception as e:
-        st.error(f"Error: {e}")
+        st.error(f"Error fetching news: {e}")
