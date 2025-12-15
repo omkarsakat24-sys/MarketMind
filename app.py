@@ -3,9 +3,8 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
 import feedparser
+from datetime import datetime, timedelta
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="MarketMind", page_icon="🧠", layout="wide")
@@ -14,32 +13,37 @@ st.set_page_config(page_title="MarketMind", page_icon="🧠", layout="wide")
 st.markdown(
     """
 <style>
-    .stApp {
-        background-color: #0e1117;
-        color: #FAFAFA;
-    }
-    .metric-card {
-        background-color: #1e2130;
-        padding: 20px;
-        border-radius: 10px;
-        border: 1px solid #2e3346;
-    }
-    h1, h2, h3 {
-        color: #00e676; /* Neon Green */
-        font-family: 'Segoe UI', sans-serif;
-    }
-    .stAlert {
-        background-color: #1e2130;
-        color: #ff4b4b;
-        border: 1px solid #ff4b4b;
-    }
+    .stApp { background-color: #0e1117; color: #FAFAFA; }
+    h1, h2, h3 { color: #00e676; font-family: 'Segoe UI', sans-serif; }
+    .stButton>button { width: 100%; border-radius: 5px; font-weight: bold; }
+    /* Make Metric Values Bigger */
+    div[data-testid="stMetricValue"] { font-size: 24px; color: #00e676; }
 </style>
 """,
     unsafe_allow_html=True,
 )
 
 
-# --- MODULE 1: TRAP DETECTOR LOGIC (NOW WITH DIIs!) ---
+# --- HELPER: SMART TICKER FIXER ---
+def fix_ticker(symbol):
+    s = symbol.strip().upper()
+    index_map = {
+        "NIFTY": "^NSEI",
+        "NIFTY50": "^NSEI",
+        "NIFTY 50": "^NSEI",
+        "BANKNIFTY": "^NSEBANK",
+        "BANK NIFTY": "^NSEBANK",
+        "SENSEX": "^BSESN",
+        "FINNIFTY": "^CNXFIN",
+    }
+    if s in index_map:
+        return index_map[s]
+    if s.endswith(".NS") or s.endswith(".BO") or s.startswith("^"):
+        return s
+    return f"{s}.NS"
+
+
+# --- LOGIC MODULES ---
 def analyze_trap(
     fii_long, fii_short, dii_long, dii_short, client_long, client_short, pcr, vix
 ):
@@ -47,55 +51,33 @@ def analyze_trap(
     total_dii = dii_long + dii_short
     total_client = client_long + client_short
 
-    if total_fii == 0 or total_client == 0 or total_dii == 0:
-        return "WAITING FOR DATA", "gray", "Input Data on Sidebar", 0, 0
+    if total_fii == 0 or total_client == 0:
+        return "WAITING", "gray", "Input Data", 0, 0
 
-    fii_long_pct = (fii_long / total_fii) * 100
-    dii_long_pct = (dii_long / total_dii) * 100
-    client_long_pct = (client_long / total_client) * 100
+    fii_pct = (fii_long / total_fii) * 100
+    dii_pct = (dii_long / total_dii) * 100
+    client_pct = (client_long / total_client) * 100
 
-    signal = "NEUTRAL"
-    color = "gray"
-    msg = "Market is balanced. Follow price action."
+    signal, color, msg = "NEUTRAL", "gray", "Market is balanced."
 
-    # --- THE LOGIC ENGINE ---
+    if client_pct > 60 and fii_pct < 30:
+        signal, color = "BEAR TRAP ⚠️", "red"
+        msg = f"Retail Long ({client_pct:.0f}%), FII Short ({100-fii_pct:.0f}%). Crash Risk."
+    elif client_pct < 40 and fii_pct > 65:
+        signal, color = "SMART BUYING 🟢", "green"
+        msg = f"FII Long ({fii_pct:.0f}%), Retail Scared. Buy Dips."
+    elif fii_pct < 15:
+        signal, color = "ROCKET ALERT 🚀", "orange"
+        msg = "FII Shorts Maxed Out. Short Covering Rally Imminent."
 
-    # 1. BEAR TRAP (Retail Bullish, Big Money Bearish)
-    if client_long_pct > 60 and fii_long_pct < 30:
-        signal = "BEAR TRAP ⚠️"
-        color = "red"
-        msg = f"Retail is buying ({client_long_pct:.0f}%) while FIIs are shorting ({100-fii_long_pct:.0f}%)."
-        if dii_long_pct < 40:
-            msg += " Even DIIs are not supporting! CRASH RISK HIGH."
-        else:
-            msg += " However, DIIs are buying support. Expect choppy range."
-
-    # 2. BULL TRAP (Retail Bearish, Big Money Bullish)
-    elif client_long_pct < 40 and fii_long_pct > 65:
-        signal = "SMART BUYING 🟢"
-        color = "green"
-        msg = "FIIs are Long. Retail is scared."
-        if dii_long_pct > 60:
-            msg += " DIIs are also Long. Double Engine rally possible!"
-
-    # 3. SHORT COVERING (FIIs Exhausted)
-    elif fii_long_pct < 15:
-        signal = "ROCKET ALERT 🚀"
-        color = "orange"
-        msg = (
-            "FII Shorts are maxed out. Any positive news will trigger a vertical rally."
-        )
-
-    return signal, color, msg, fii_long_pct, dii_long_pct
+    return signal, color, msg, fii_pct, dii_pct
 
 
-# --- DATA FETCHING FUNCTIONS ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=600)
 def get_stock_data(tickers, period="2y", interval="1wk"):
-    data = yf.download(
+    return yf.download(
         tickers, period=period, interval=interval, group_by="ticker", progress=False
     )
-    return data
 
 
 @st.cache_data(ttl=600)
@@ -107,345 +89,383 @@ def fetch_market_news(query="Indian Stock Market"):
         f"https://news.google.com/rss/search?q={clean_query}&hl=en-IN&gl=IN&ceid=IN:en"
     )
     try:
-        feed = feedparser.parse(rss_url)
-        return feed.entries[:10]
-    except Exception:
+        return feedparser.parse(rss_url).entries[:10]
+    except:
         return []
 
 
-# --- SIDEBAR INPUTS ---
+def calculate_gann_levels(price):
+    sq = np.sqrt(price)
+    return [
+        (sq - 2) ** 2,
+        (sq - 1) ** 2,
+        (sq - 0.5) ** 2,
+        (sq - 0.25) ** 2,
+        price,
+        (sq + 0.25) ** 2,
+        (sq + 0.5) ** 2,
+        (sq + 1) ** 2,
+        (sq + 2) ** 2,
+    ]
+
+
+# --- SIDEBAR ---
 with st.sidebar:
-    st.header("⚙️ Data Input")
-    st.markdown("Enter yesterday's F&O data:")
-
-    # FII Inputs
-    st.subheader("FII (Foreign)")
-    fii_long_qty = st.number_input("FII Longs", value=35000)
-    fii_short_qty = st.number_input("FII Shorts", value=125000)
-
-    # DII Inputs (NEW!)
-    st.subheader("DII (Domestic)")
-    dii_long_qty = st.number_input("DII Longs", value=55000)
-    dii_short_qty = st.number_input("DII Shorts", value=25000)
-
-    # Client Inputs
-    st.subheader("Client (Retail)")
-    client_long_qty = st.number_input("Client Longs", value=300000)
-    client_short_qty = st.number_input("Client Shorts", value=150000)
-
+    st.header("⚙️ F&O Data")
+    fii_L = st.number_input("FII Longs", 35000)
+    fii_S = st.number_input("FII Shorts", 125000)
+    dii_L = st.number_input("DII Longs", 55000)
+    dii_S = st.number_input("DII Shorts", 25000)
+    cli_L = st.number_input("Client Longs", 300000)
+    cli_S = st.number_input("Client Shorts", 150000)
     st.divider()
-    input_pcr = st.number_input("Nifty PCR", value=0.75)
-    input_vix = st.number_input("India VIX", value=12.5)
+    pcr = st.number_input("PCR", 0.75)
+    vix = st.number_input("VIX", 12.5)
 
-# --- MAIN DASHBOARD ---
+# --- MAIN APP ---
 st.title("🧠 MarketMind: The Irrationality Scanner")
-st.markdown("Don't trade the Price. Trade the **Behavior**.")
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
+tabs = st.tabs(
     [
         "🔥 Trap Detector",
         "🧭 Sector Compass",
         "💎 Stage 2 Scanner",
         "🚀 Hype Meter",
         "📰 Live News",
+        "📐 Gann Master",
+        "🗺️ Heatmap",
     ]
 )
 
-# --- TAB 1: TRAP DETECTOR (UPGRADED) ---
-with tab1:
-    signal, color_code, message, fii_pct, dii_pct = analyze_trap(
-        fii_long_qty,
-        fii_short_qty,
-        dii_long_qty,
-        dii_short_qty,
-        client_long_qty,
-        client_short_qty,
-        input_pcr,
-        input_vix,
+# TAB 1: TRAP DETECTOR
+with tabs[0]:
+    sig, col, txt, fpKg, dpKg = analyze_trap(
+        fii_L, fii_S, dii_L, dii_S, cli_L, cli_S, pcr, vix
     )
+    c1, c2, c3 = st.columns(3)
+    c1.markdown(f"## {sig}")
+    c2.metric("VIX", vix)
+    c3.metric("PCR", pcr)
+    st.info(txt)
+    st.progress(int(fpKg), text=f"FII Bullishness: {fpKg:.1f}%")
+    st.progress(int(dpKg), text=f"DII Bullishness: {dpKg:.1f}%")
 
-    # Top Metrics
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(
-            f"### Signal: <span style='color:{color_code}'>{signal}</span>",
-            unsafe_allow_html=True,
-        )
-    with col2:
-        st.metric("Fear Gauge (VIX)", f"{input_vix}")
-    with col3:
-        st.metric("Greed Gauge (PCR)", f"{input_pcr}")
-
-    st.info(f"**Insight:** {message}")
-
-    # The Battle Meter
-    st.write("### ⚔️ The Institutional Battle")
-
-    col_fii, col_dii = st.columns(2)
-    with col_fii:
-        st.write(f"**FII Sentiment (Foreign)**: {fii_pct:.1f}% Bullish")
-        st.progress(int(fii_pct))
-
-    with col_dii:
-        st.write(f"**DII Sentiment (Domestic)**: {dii_pct:.1f}% Bullish")
-        st.progress(int(dii_pct))
-
-    st.caption(
-        "Note: Usually DIIs buy when FIIs sell. If BOTH bars are low (Red), the market has no support."
-    )
-
-# --- TAB 2: SECTOR COMPASS ---
-with tab2:
-    st.subheader("Where is the Money Flowing?")
+# TAB 2: SECTOR COMPASS (CRYSTAL CLEAR VERSION)
+with tabs[1]:
+    st.markdown("### 🧭 Relative Rotation Graph (RRG)")
     if st.button("Scout Sectors"):
         with st.spinner("Analyzing Sector Rotation..."):
-            sectors = {
-                "Nifty Bank": "^NSEBANK",
-                "Nifty IT": "^CNXIT",
-                "Nifty Auto": "^CNXAUTO",
-                "Nifty Pharma": "^CNXPHARMA",
-                "Nifty Metal": "^CNXMETAL",
-                "Nifty FMCG": "^CNXFMCG",
-                "Nifty Energy": "^CNXENERGY",
-                "Nifty Realty": "^CNXREALTY",
+            secs = {
+                "Bank": "^NSEBANK",
+                "IT": "^CNXIT",
+                "Auto": "^CNXAUTO",
+                "Pharma": "^CNXPHARMA",
+                "Metal": "^CNXMETAL",
+                "FMCG": "^CNXFMCG",
+                "Realty": "^CNXREALTY",
+                "Energy": "^CNXENERGY",
             }
-            sector_data = get_stock_data(
-                list(sectors.values()) + ["^NSEI"], period="6mo", interval="1d"
-            )
-            rrg_results = []
-
-            for name, ticker in sectors.items():
+            data = get_stock_data(list(secs.values()) + ["^NSEI"], "6mo", "1d")
+            res = []
+            for n, t in secs.items():
                 try:
-                    sec_close = sector_data[ticker]["Close"]
-                    nifty_close = sector_data["^NSEI"]["Close"]
-                    rs_raw = (sec_close / nifty_close) * 100
-                    rs_ratio = (rs_raw / rs_raw.rolling(window=20).mean()) * 100
-                    rs_mom = (rs_ratio / rs_ratio.shift(10)) * 100
-                    curr_ratio = rs_ratio.iloc[-1]
-                    curr_mom = rs_mom.iloc[-1]
-
-                    if curr_ratio > 100 and curr_mom > 100:
-                        quadrant, color = "Leading", "green"
-                    elif curr_ratio > 100 and curr_mom < 100:
-                        quadrant, color = "Weakening", "yellow"
-                    elif curr_ratio < 100 and curr_mom < 100:
-                        quadrant, color = "Lagging", "red"
-                    elif curr_ratio < 100 and curr_mom > 100:
-                        quadrant, color = "Improving", "blue"
-
-                    rrg_results.append([name, curr_ratio, curr_mom, quadrant, color])
-                except Exception:
+                    s, i = data[t]["Close"], data["^NSEI"]["Close"]
+                    rs = (s / i) * 100
+                    ratio = (rs / rs.rolling(20).mean()).iloc[-1] * 100
+                    mom = (
+                        ratio / ((rs / rs.rolling(20).mean()).shift(10).iloc[-1] * 100)
+                    ) * 100
+                    q = (
+                        "Leading"
+                        if ratio > 100 and mom > 100
+                        else (
+                            "Weakening"
+                            if ratio > 100
+                            else "Lagging" if ratio < 100 and mom < 100 else "Improving"
+                        )
+                    )
+                    res.append([n, ratio, mom, q])
+                except:
                     pass
 
-            df_rrg = pd.DataFrame(
-                rrg_results,
-                columns=["Sector", "Ratio", "Momentum", "Quadrant", "Color"],
-            )
+            df = pd.DataFrame(res, columns=["Sector", "Ratio", "Mom", "Quad"])
+
+            # PLOT WITH TEXT LABELS
             fig = px.scatter(
-                df_rrg,
+                df,
                 x="Ratio",
-                y="Momentum",
-                color="Quadrant",
-                hover_name="Sector",
+                y="Mom",
+                color="Quad",
                 text="Sector",
-                title="Sector Rotation Map",
-                width=900,
-                height=700,
+                size=[20] * len(df),
+                title="Where is Money Flowing?",
                 color_discrete_map={
                     "Leading": "#00FF00",
                     "Weakening": "#FFFF00",
                     "Lagging": "#FF0000",
                     "Improving": "#00CCFF",
                 },
-                size=[15] * len(df_rrg),
             )
-            fig.update_traces(textposition="top center", textfont_size=12)
-            fig.add_hline(y=100, line_dash="dot", line_color="gray")
-            fig.add_vline(x=100, line_dash="dot", line_color="gray")
-            fig.update_layout(
-                plot_bgcolor="#0e1117",
-                paper_bgcolor="#0e1117",
-                font=dict(color="#FAFAFA"),
+
+            # Force text to always show
+            fig.update_traces(
+                textposition="top center", textfont=dict(size=14, color="white")
             )
+            fig.add_hline(100, line_dash="dot", line_color="gray")
+            fig.add_vline(100, line_dash="dot", line_color="gray")
             st.plotly_chart(fig, use_container_width=True)
 
-# --- TAB 3: STAGE 2 SCANNER ---
-with tab3:
-    st.subheader("The Stage 2 Hit List")
-    user_tickers = st.text_area(
-        "Enter Stock Tickers (add .NS):",
-        "RELIANCE.NS, TATASTEEL.NS, INFY.NS, HDFCBANK.NS, TATAMOTORS.NS, SBIN.NS, ITC.NS",
-    )
+            # CRYSTAL CLEAR TABLE
+            st.divider()
+            c1, c2 = st.columns(2)
+            with c1:
+                st.success("✅ **LEADING (Buy These):**")
+                leaders = df[df["Quad"] == "Leading"]["Sector"].tolist()
+                st.write(", ".join(leaders) if leaders else "None")
+
+                st.info("💎 **IMPROVING (Watch These):**")
+                improvers = df[df["Quad"] == "Improving"]["Sector"].tolist()
+                st.write(", ".join(improvers) if improvers else "None")
+
+            with c2:
+                st.error("❌ **LAGGING (Avoid These):**")
+                laggers = df[df["Quad"] == "Lagging"]["Sector"].tolist()
+                st.write(", ".join(laggers) if laggers else "None")
+
+                st.warning("⚠️ **WEAKENING (Book Profit):**")
+                weakeners = df[df["Quad"] == "Weakening"]["Sector"].tolist()
+                st.write(", ".join(weakeners) if weakeners else "None")
+
+# TAB 3: STAGE 2
+with tabs[2]:
+    st.markdown("Enter Stocks (comma separated):")
+    u_t = st.text_area("Tickers", "RELIANCE, SBIN, TATAMOTORS, INFY, ITC, TATASTEEL")
     if st.button("Run Scanner"):
-        ticker_list = [x.strip() for x in user_tickers.split(",")]
-        with st.spinner("Checking Weekly Charts..."):
-            data = get_stock_data(ticker_list, period="2y", interval="1wk")
-            valid_breakouts = []
-            for ticker in ticker_list:
-                try:
-                    df = data[ticker].copy()
-                    df["30W_MA"] = df["Close"].rolling(window=30).mean()
-                    current_price = df["Close"].iloc[-1]
-                    ma_value = df["30W_MA"].iloc[-1]
-                    prev_ma_value = df["30W_MA"].iloc[-5]
-                    if current_price > ma_value and ma_value > prev_ma_value:
-                        dist = ((current_price - ma_value) / ma_value) * 100
-                        valid_breakouts.append([ticker, current_price, dist])
-                except Exception:
+        t_l = [fix_ticker(x) for x in u_t.split(",")]
+        data = get_stock_data(t_l)
+        res = []
+        for t in t_l:
+            try:
+                df = data[t]
+                curr = df["Close"].iloc[-1]
+                ma = df["Close"].rolling(30).mean().iloc[-1]
+                if curr > ma and ma > df["Close"].rolling(30).mean().iloc[-5]:
+                    res.append([t, curr, ((curr - ma) / ma) * 100])
+            except:
+                pass
+        st.dataframe(pd.DataFrame(res, columns=["Stock", "Price", "% Above MA"]))
+
+# TAB 4: HYPE METER
+with tabs[3]:
+    sens = st.slider("Sensitivity", 0.5, 5.0, 1.5, 0.5)
+    u_h = st.text_area(
+        "Hype Watchlist", "ADANIENT, ZOMATO, SUZLON, IREDA, JIOFIN, RVNL, IDEA, YESBANK"
+    )
+    if st.button("Scan Hype"):
+        h_l = [fix_ticker(x) for x in u_h.split(",")]
+        data = get_stock_data(h_l, "1mo", "1d")
+        res = []
+        for t in h_l:
+            try:
+                df = data[t]
+                if len(df) < 5:
                     continue
-            if valid_breakouts:
-                st.balloons()
-                st.dataframe(
-                    pd.DataFrame(
-                        valid_breakouts, columns=["Stock", "Price", "% Above MA"]
+                v = (
+                    df["Volume"].iloc[-1]
+                    if df["Volume"].iloc[-1] > 0
+                    else df["Volume"].iloc[-2]
+                )
+                c = (
+                    df["Close"].iloc[-1]
+                    if df["Volume"].iloc[-1] > 0
+                    else df["Close"].iloc[-2]
+                )
+                dt = df.index[-1] if df["Volume"].iloc[-1] > 0 else df.index[-2]
+                fac = v / df["Volume"].mean()
+                if fac > sens:
+                    res.append(
+                        [t, c, f"{fac:.1f}x", "🔥" if fac > 5 else "⚠️", dt.date()]
                     )
-                )
-            else:
-                st.warning("No Stage 2 Breakouts found.")
-# --- TAB 4: HYPE METER (Weekend Proof) ---
-with tab4:
-    st.subheader("The Hype Meter: Retail Euphoria Tracker")
-    st.markdown("Scan for abnormal volume. High Volume + No Price Move = **Trap**.")
-
-    # 1. THE SLIDER
-    sensitivity = st.slider(
-        "Volume Sensitivity (Multiplier):",
-        min_value=0.5,
-        max_value=5.0,
-        value=1.5,
-        step=0.5,
-    )
-    st.caption(f"🔍 Scanning for stocks with Volume > {sensitivity}x of average.")
-
-    # 2. THE INPUT BOX
-    hype_tickers = st.text_area(
-        "Watchlist (Add .NS for NSE):",
-        "ADANIENT.NS, ADANIGREEN.NS, SUZLON.NS, IREDA.NS, JIOFIN.NS, ZOMATO.NS, HUDCO.NS, RVNL.NS",
-    )
-
-    # 3. THE SCANNER LOGIC
-    if st.button("Scan for Hype"):
-        hype_list = [x.strip() for x in hype_tickers.split(",")]
-        with st.spinner(f"Analyzing Volume Data..."):
-            data = get_stock_data(hype_list, period="1mo", interval="1d")
-            hype_results = []
-
-            for ticker in hype_list:
-                try:
-                    df = data[ticker].copy()
-                    if len(df) < 5:
-                        continue
-
-                    # --- WEEKEND FIX START ---
-                    # Check if the last row (Latest) has 0 volume (Common weekend bug)
-                    last_vol = df["Volume"].iloc[-1]
-
-                    if last_vol == 0 or np.isnan(last_vol):
-                        # Use Friday's data instead
-                        curr_vol = df["Volume"].iloc[-2]
-                        curr_close = df["Close"].iloc[-2]
-                        curr_open = df["Open"].iloc[-2]
-                        data_date = df.index[-2].strftime("%Y-%m-%d")
-                    else:
-                        # Use Today's data
-                        curr_vol = last_vol
-                        curr_close = df["Close"].iloc[-1]
-                        curr_open = df["Open"].iloc[-1]
-                        data_date = df.index[-1].strftime("%Y-%m-%d")
-                    # --- WEEKEND FIX END ---
-
-                    avg_vol = df["Volume"].mean()
-                    hype_factor = curr_vol / avg_vol
-
-                    # FILTER
-                    if hype_factor > sensitivity:
-                        status = (
-                            "🔥 EXTREME"
-                            if hype_factor > 5
-                            else "⚠️ HIGH" if hype_factor > 3 else "👀 ACTIVE"
-                        )
-                        price_change = ((curr_close - curr_open) / curr_open) * 100
-
-                        hype_results.append(
-                            [
-                                ticker,
-                                f"{curr_close:.2f}",
-                                f"{hype_factor:.1f}x",
-                                f"{price_change:.2f}%",
-                                status,
-                                data_date,
-                            ]
-                        )
-                except Exception:
-                    continue
-
-            # 4. DISPLAY RESULTS
-            if hype_results:
-                st.dataframe(
-                    pd.DataFrame(
-                        hype_results,
-                        columns=[
-                            "Stock",
-                            "Price",
-                            "Vol Spike",
-                            "Change %",
-                            "Intensity",
-                            "Date",
-                        ],
-                    )
-                )
-                st.info(
-                    "💡 **Note:** 'Date' shows you exactly which trading day was analyzed."
-                )
-            else:
-                st.warning(
-                    f"No spikes found above {sensitivity}x. (Try lowering the slider to 0.5x to verify data is loading)."
-                )
-
-# --- TAB 5: LIVE NEWS ---
-# --- TAB 5: LIVE NEWS (Search Anything) ---
-# --- TAB 5: LIVE NEWS (Search Anything) ---
-with tab5:
-    st.header("📰 The Market Narrative")
-    st.markdown(
-        "Context Check: Search for the specific stock you found in the scanner."
-    )
-
-    col1, col2 = st.columns([3, 1])
-
-    with col1:
-        # UPGRADE: Changed from 'selectbox' to 'text_input' so you can type anything
-        # We set a default value to "Indian Stock Market"
-        news_topic = st.text_input(
-            "Search News (Type Stock Name):", "Indian Stock Market"
+            except:
+                pass
+        st.dataframe(
+            pd.DataFrame(res, columns=["Stock", "Price", "Vol Spike", "Tag", "Date"])
         )
 
-    with col2:
-        st.write("")
-        st.write("")
-        if st.button("📢 Fetch News", type="primary", use_container_width=True):
-            st.session_state["fetch_news"] = True
+# TAB 5: NEWS
+with tabs[4]:
+    q = st.text_input("Topic", "Indian Stock Market")
+    if st.button("Fetch News"):
+        for i in fetch_market_news(q):
+            st.markdown(f"**[{i.title}]({i.link})**")
 
-    st.divider()
+# TAB 6: GANN MASTER (RESTORED BEST LAYOUT)
+with tabs[5]:
+    st.subheader("📐 Gann Square of 9 Calculator")
+    gt = fix_ticker(st.text_input("Enter Ticker (e.g., NIFTY, RELIANCE):", "NIFTY"))
 
-    try:
-        if news_topic:
-            with st.spinner(f"Searching Google News for '{news_topic}'..."):
-                news_items = fetch_market_news(news_topic)
+    if st.button("Calculate Levels"):
+        d = yf.Ticker(gt).history(period="1y")
+        if not d.empty:
+            h, l = d["High"].max(), d["Low"].min()
+            cur = d["Close"].iloc[-1]
+            h_dt = d["High"].idxmax().strftime("%Y-%m-%d")
+            l_dt = d["Low"].idxmin().strftime("%Y-%m-%d")
 
-                if not news_items:
-                    st.warning(
-                        f"No recent news found for '{news_topic}'. Try typing the full company name."
+            st.success(f"**{gt}** | CMP: {cur:.2f}")
+
+            # --- THE CLEAN DASHBOARD LAYOUT ---
+            colA, colB = st.columns(2)
+
+            with colA:
+                st.markdown("### 🔴 Levels from Top")
+                st.caption(f"Major High: {h:.2f} ({h_dt})")
+                lev_h = calculate_gann_levels(h)
+
+                c1, c2 = st.columns(2)
+                c1.metric("Resistance (360°)", f"{lev_h[8]:.2f}")
+                c2.metric("Support (90°)", f"{lev_h[2]:.2f}")
+                st.metric("Support (180°)", f"{lev_h[1]:.2f}")
+
+            with colB:
+                st.markdown("### 🟢 Levels from Bottom")
+                st.caption(f"Major Low: {l:.2f} ({l_dt})")
+                lev_l = calculate_gann_levels(l)
+
+                c3, c4 = st.columns(2)
+                c3.metric("Resistance (180°)", f"{lev_l[7]:.2f}")
+                c4.metric("Resistance (360°)", f"{lev_l[8]:.2f}")
+                st.metric("Major Support", f"{lev_l[4]:.2f}")
+
+            st.divider()
+            st.subheader("⏳ Gann Time Cycles (Watch Dates)")
+            start = datetime.strptime(h_dt, "%Y-%m-%d")
+            dates = []
+            for d in [45, 90, 144, 180, 360]:
+                fd = start + timedelta(days=d)
+                if fd > datetime.now():
+                    dates.append(f"**{d} Days:** {fd.strftime('%d %b %Y')}")
+            for d in dates:
+                st.write(d)
+
+# TAB 7: HEATMAP
+with tabs[6]:
+    st.subheader("🗺️ Market Heatmap")
+    lists = {
+        "Nifty 50": [
+            "RELIANCE",
+            "TCS",
+            "HDFCBANK",
+            "ICICIBANK",
+            "INFY",
+            "BHARTIARTL",
+            "ITC",
+            "SBIN",
+            "LICI",
+            "HINDUNILVR",
+            "LT",
+            "BAJFINANCE",
+            "HCLTECH",
+            "MARUTI",
+            "SUNPHARMA",
+            "ADANIENT",
+            "KOTAKBANK",
+            "TITAN",
+            "TATAMOTORS",
+            "ONGC",
+            "AXISBANK",
+            "NTPC",
+            "ULTRACEMCO",
+            "POWERGRID",
+            "ADANIPORTS",
+            "M&M",
+            "WIPRO",
+            "COALINDIA",
+            "BAJAJ-AUTO",
+            "ASIANPAINT",
+            "JSWSTEEL",
+            "NESTLEIND",
+            "GRASIM",
+            "LTIM",
+            "SBILIFE",
+            "TECHM",
+            "HDFCLIFE",
+            "BSOFT",
+            "CIPLA",
+            "TATASTEEL",
+            "EICHERMOT",
+            "DIVISLAB",
+            "DRREDDY",
+            "HEROMOTOCO",
+            "TATACONSUM",
+            "APOLLOHOSP",
+            "BPCL",
+            "BRITANNIA",
+            "INDUSINDBK",
+        ],
+        "Nifty Bank": [
+            "HDFCBANK",
+            "ICICIBANK",
+            "SBIN",
+            "KOTAKBANK",
+            "AXISBANK",
+            "INDUSINDBK",
+            "BANKBARODA",
+            "PNB",
+            "IDFCFIRSTB",
+            "AUBANK",
+        ],
+        "Nifty IT": [
+            "TCS",
+            "INFY",
+            "HCLTECH",
+            "WIPRO",
+            "TECHM",
+            "LTIM",
+            "PERSISTENT",
+            "COFORGE",
+            "MPHASIS",
+            "LTTS",
+        ],
+    }
+    sel = st.selectbox("View:", list(lists.keys()))
+    if st.button("Generate Map"):
+        ticks = [fix_ticker(x) for x in lists[sel]]
+        with st.spinner("Building Map..."):
+            data = get_stock_data(ticks, "5d", "1d")
+            h_data = []
+            for t in ticks:
+                try:
+                    df = data[t]
+                    l_c = df["Close"].iloc[-1]
+                    p_c = df["Close"].iloc[-2]
+                    if l_c == 0 or np.isnan(l_c):
+                        l_c = df["Close"].iloc[-2]
+                        p_c = df["Close"].iloc[-3]
+                    pct = ((l_c - p_c) / p_c) * 100
+                    h_data.append(
+                        {
+                            "Ticker": t.replace(".NS", ""),
+                            "Change": pct,
+                            "Price": l_c,
+                            "Label": f"{t.replace('.NS','')}\n{pct:.2f}%",
+                        }
                     )
-
-                for item in news_items:
-                    pub_time = (
-                        item.published.replace("+0530", "")
-                        if hasattr(item, "published")
-                        else ""
-                    )
-                    with st.expander(f"📄 {item.title}"):
-                        st.caption(f"🕒 {pub_time}")
-                        st.markdown(f"**[Read Full Story]({item.link})**")
-    except Exception as e:
-        st.error(f"Error fetching news: {e}")
+                except:
+                    pass
+            if h_data:
+                fig = px.treemap(
+                    pd.DataFrame(h_data),
+                    path=["Ticker"],
+                    values="Price",
+                    color="Change",
+                    color_continuous_scale=["#FF0000", "#121212", "#00FF00"],
+                    color_continuous_midpoint=0,
+                )
+                fig.update_traces(
+                    textinfo="label+text",
+                    texttemplate="%{label}",
+                    textposition="middle center",
+                    textfont=dict(size=14, color="white"),
+                )
+                fig.update_layout(height=650, margin=dict(t=30, l=10, r=10, b=10))
+                st.plotly_chart(fig, use_container_width=True)
