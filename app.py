@@ -9,14 +9,13 @@ from datetime import datetime, timedelta
 # --- CONFIGURATION ---
 st.set_page_config(page_title="MarketMind", page_icon="🧠", layout="wide")
 
-# Custom CSS for "Bloomberg Dark" Theme
+# Custom CSS
 st.markdown(
     """
 <style>
     .stApp { background-color: #0e1117; color: #FAFAFA; }
     h1, h2, h3 { color: #00e676; font-family: 'Segoe UI', sans-serif; }
     .stButton>button { width: 100%; border-radius: 5px; font-weight: bold; }
-    /* Make Metric Values Bigger */
     div[data-testid="stMetricValue"] { font-size: 24px; color: #00e676; }
 </style>
 """,
@@ -24,92 +23,87 @@ st.markdown(
 )
 
 
-# --- HELPER: SMART TICKER FIXER ---
+# --- 1. HELPER FUNCTIONS (THE BRAIN) ---
+# --- HELPER FUNCTIONS ---
 def fix_ticker(symbol):
     s = symbol.strip().upper()
-    index_map = {
+
+    # 1. Map Common Names to Real Tickers
+    name_map = {
         "NIFTY": "^NSEI",
         "NIFTY50": "^NSEI",
-        "NIFTY 50": "^NSEI",
         "BANKNIFTY": "^NSEBANK",
-        "BANK NIFTY": "^NSEBANK",
         "SENSEX": "^BSESN",
         "FINNIFTY": "^CNXFIN",
+        # COMMON STOCKS MAPPING
+        "VEDANTA": "VEDL",
+        "HDFC": "HDFCBANK",
+        "BAJFIN": "BAJFINANCE",
+        "M&M": "M&M",
+        "MAHINDRA": "M&M",
+        "MARUTI": "MARUTI",
+        "TITAN": "TITAN",
+        "AIRTEL": "BHARTIARTL",
+        "JIO": "JIOFIN",
+        "POWERGRID": "POWERGRID",
+        "NTPC": "NTPC",
     }
-    if s in index_map:
-        return index_map[s]
+
+    if s in name_map:
+        s = name_map[s]  # Convert Name to Ticker (e.g., VEDANTA -> VEDL)
+
+    # 2. Add Extension if missing
     if s.endswith(".NS") or s.endswith(".BO") or s.startswith("^"):
         return s
     return f"{s}.NS"
 
 
-# --- LOGIC MODULES ---
-def analyze_trap(
-    fii_long, fii_short, dii_long, dii_short, client_long, client_short, pcr, vix
-):
-    total_fii = fii_long + fii_short
-    total_dii = dii_long + dii_short
-    total_client = client_long + client_short
+def fetch_financial_metrics(tickers):
+    """Fetches Fundamental Data with Backup Checks."""
+    metrics = []
+    for t in tickers:
+        try:
+            ticker_obj = yf.Ticker(t)
+            info = ticker_obj.info
 
-    if total_fii == 0 or total_client == 0:
-        return "WAITING", "gray", "Input Data", 0, 0
+            # 1. SMART GROWTH CHECK (Try Annual -> Quarterly -> Earnings Growth)
+            rev_g = info.get("revenueGrowth")
+            if rev_g is None:
+                rev_g = info.get("quarterlyRevenueGrowth")
+            if rev_g is None:
+                rev_g = info.get("earningsGrowth")
+            if rev_g is None:
+                rev_g = 0  # Default if absolutely no data found
 
-    fii_pct = (fii_long / total_fii) * 100
-    dii_pct = (dii_long / total_dii) * 100
-    client_pct = (client_long / total_client) * 100
+            # 2. SMART MARGIN CHECK (Try Net -> Operating -> Gross)
+            pm = info.get("profitMargins")
+            if pm is None:
+                pm = info.get("operatingMargins")
+            if pm is None:
+                pm = info.get("grossMargins")
+            if pm is None:
+                pm = 0
 
-    signal, color, msg = "NEUTRAL", "gray", "Market is balanced."
+            mc = info.get("marketCap", 0)
+            name = info.get("shortName", t)
 
-    if client_pct > 60 and fii_pct < 30:
-        signal, color = "BEAR TRAP ⚠️", "red"
-        msg = f"Retail Long ({client_pct:.0f}%), FII Short ({100-fii_pct:.0f}%). Crash Risk."
-    elif client_pct < 40 and fii_pct > 65:
-        signal, color = "SMART BUYING 🟢", "green"
-        msg = f"FII Long ({fii_pct:.0f}%), Retail Scared. Buy Dips."
-    elif fii_pct < 15:
-        signal, color = "ROCKET ALERT 🚀", "orange"
-        msg = "FII Shorts Maxed Out. Short Covering Rally Imminent."
+            metrics.append(
+                {
+                    "Ticker": t.replace(".NS", ""),
+                    "Name": name,
+                    "Rev Growth (%)": rev_g * 100,
+                    "Profit Margin (%)": pm * 100,
+                    "Market Cap": mc,
+                    "Size": np.log(mc) if mc > 0 else 1,
+                }
+            )
+        except Exception as e:
+            pass
 
-    return signal, color, msg, fii_pct, dii_pct
-
-
-@st.cache_data(ttl=600)
-def get_stock_data(tickers, period="2y", interval="1wk"):
-    return yf.download(
-        tickers, period=period, interval=interval, group_by="ticker", progress=False
-    )
-
-
-@st.cache_data(ttl=600)
-def fetch_market_news(query="Indian Stock Market"):
-    if not query:
-        return []
-    clean_query = query.replace(" ", "%20")
-    rss_url = (
-        f"https://news.google.com/rss/search?q={clean_query}&hl=en-IN&gl=IN&ceid=IN:en"
-    )
-    try:
-        return feedparser.parse(rss_url).entries[:10]
-    except:
-        return []
+    return pd.DataFrame(metrics)
 
 
-def calculate_gann_levels(price):
-    sq = np.sqrt(price)
-    return [
-        (sq - 2) ** 2,
-        (sq - 1) ** 2,
-        (sq - 0.5) ** 2,
-        (sq - 0.25) ** 2,
-        price,
-        (sq + 0.25) ** 2,
-        (sq + 0.5) ** 2,
-        (sq + 1) ** 2,
-        (sq + 2) ** 2,
-    ]
-
-
-# --- SIDEBAR ---
+# --- SIDEBAR & INPUTS ---
 with st.sidebar:
     st.header("⚙️ F&O Data")
     fii_L = st.number_input("FII Longs", 35000)
@@ -128,32 +122,49 @@ tabs = st.tabs(
     [
         "🔥 Trap Detector",
         "🧭 Sector Compass",
-        "💎 Stage 2 Scanner",
+        "💎 Stage 2",
         "🚀 Hype Meter",
-        "📰 Live News",
-        "📐 Gann Master",
+        "📰 News",
+        "📐 Gann",
         "🗺️ Heatmap",
+        "🧬 Lifecycle",
     ]
 )
 
 # TAB 1: TRAP DETECTOR
 with tabs[0]:
-    sig, col, txt, fpKg, dpKg = analyze_trap(
-        fii_L, fii_S, dii_L, dii_S, cli_L, cli_S, pcr, vix
-    )
-    c1, c2, c3 = st.columns(3)
-    c1.markdown(f"## {sig}")
-    c2.metric("VIX", vix)
-    c3.metric("PCR", pcr)
-    st.info(txt)
-    st.progress(int(fpKg), text=f"FII Bullishness: {fpKg:.1f}%")
-    st.progress(int(dpKg), text=f"DII Bullishness: {dpKg:.1f}%")
+    tf = fii_L + fii_S
+    tc = cli_L + cli_S
+    if tf > 0 and tc > 0:
+        fp = (fii_L / tf) * 100
+        cp = (cli_L / tc) * 100
+        dp = (dii_L / (dii_L + dii_S)) * 100 if (dii_L + dii_S) > 0 else 0
 
-# TAB 2: SECTOR COMPASS (CRYSTAL CLEAR VERSION)
+        sig, col, msg = "NEUTRAL", "gray", "Market Balanced"
+        if cp > 60 and fp < 30:
+            sig, col = "BEAR TRAP ⚠️", "red"
+            msg = "Retail Buying, FII Selling. Danger."
+        elif cp < 40 and fp > 65:
+            sig, col = "SMART BUYING 🟢", "green"
+            msg = "FII Buying, Retail Scared. Opportunity."
+        elif fp < 15:
+            sig, col = "ROCKET ALERT 🚀", "orange"
+            msg = "Short Covering Rally Likely."
+
+        st.markdown(f"### Signal: :{col}[{sig}]")
+        st.info(msg)
+        c1, c2 = st.columns(2)
+        c1.metric("VIX", vix)
+        c2.metric("PCR", pcr)
+        st.progress(int(fp), f"FII Bullish: {fp:.1f}%")
+        st.progress(int(dp), f"DII Bullish: {dp:.1f}%")
+    else:
+        st.warning("Enter Data in Sidebar")
+
+# TAB 2: SECTOR COMPASS (Uses get_stock_data)
 with tabs[1]:
-    st.markdown("### 🧭 Relative Rotation Graph (RRG)")
     if st.button("Scout Sectors"):
-        with st.spinner("Analyzing Sector Rotation..."):
+        with st.spinner("Analyzing..."):
             secs = {
                 "Bank": "^NSEBANK",
                 "IT": "^CNXIT",
@@ -162,8 +173,8 @@ with tabs[1]:
                 "Metal": "^CNXMETAL",
                 "FMCG": "^CNXFMCG",
                 "Realty": "^CNXREALTY",
-                "Energy": "^CNXENERGY",
             }
+            # Here is where it was crashing before. Now get_stock_data is defined above!
             data = get_stock_data(list(secs.values()) + ["^NSEI"], "6mo", "1d")
             res = []
             for n, t in secs.items():
@@ -186,10 +197,7 @@ with tabs[1]:
                     res.append([n, ratio, mom, q])
                 except:
                     pass
-
             df = pd.DataFrame(res, columns=["Sector", "Ratio", "Mom", "Quad"])
-
-            # PLOT WITH TEXT LABELS
             fig = px.scatter(
                 df,
                 x="Ratio",
@@ -197,7 +205,6 @@ with tabs[1]:
                 color="Quad",
                 text="Sector",
                 size=[20] * len(df),
-                title="Where is Money Flowing?",
                 color_discrete_map={
                     "Leading": "#00FF00",
                     "Weakening": "#FFFF00",
@@ -205,35 +212,12 @@ with tabs[1]:
                     "Improving": "#00CCFF",
                 },
             )
-
-            # Force text to always show
             fig.update_traces(
                 textposition="top center", textfont=dict(size=14, color="white")
             )
-            fig.add_hline(100, line_dash="dot", line_color="gray")
-            fig.add_vline(100, line_dash="dot", line_color="gray")
+            fig.add_hline(100, line_dash="dot")
+            fig.add_vline(100, line_dash="dot")
             st.plotly_chart(fig, use_container_width=True)
-
-            # CRYSTAL CLEAR TABLE
-            st.divider()
-            c1, c2 = st.columns(2)
-            with c1:
-                st.success("✅ **LEADING (Buy These):**")
-                leaders = df[df["Quad"] == "Leading"]["Sector"].tolist()
-                st.write(", ".join(leaders) if leaders else "None")
-
-                st.info("💎 **IMPROVING (Watch These):**")
-                improvers = df[df["Quad"] == "Improving"]["Sector"].tolist()
-                st.write(", ".join(improvers) if improvers else "None")
-
-            with c2:
-                st.error("❌ **LAGGING (Avoid These):**")
-                laggers = df[df["Quad"] == "Lagging"]["Sector"].tolist()
-                st.write(", ".join(laggers) if laggers else "None")
-
-                st.warning("⚠️ **WEAKENING (Book Profit):**")
-                weakeners = df[df["Quad"] == "Weakening"]["Sector"].tolist()
-                st.write(", ".join(weakeners) if weakeners else "None")
 
 # TAB 3: STAGE 2
 with tabs[2]:
@@ -298,58 +282,22 @@ with tabs[4]:
         for i in fetch_market_news(q):
             st.markdown(f"**[{i.title}]({i.link})**")
 
-# TAB 6: GANN MASTER (RESTORED BEST LAYOUT)
+# TAB 6: GANN
 with tabs[5]:
-    st.subheader("📐 Gann Square of 9 Calculator")
-    gt = fix_ticker(st.text_input("Enter Ticker (e.g., NIFTY, RELIANCE):", "NIFTY"))
-
-    if st.button("Calculate Levels"):
+    gt = fix_ticker(st.text_input("Ticker", "NIFTY"))
+    if st.button("Calculate"):
         d = yf.Ticker(gt).history(period="1y")
         if not d.empty:
             h, l = d["High"].max(), d["Low"].min()
-            cur = d["Close"].iloc[-1]
-            h_dt = d["High"].idxmax().strftime("%Y-%m-%d")
-            l_dt = d["Low"].idxmin().strftime("%Y-%m-%d")
-
-            st.success(f"**{gt}** | CMP: {cur:.2f}")
-
-            # --- THE CLEAN DASHBOARD LAYOUT ---
-            colA, colB = st.columns(2)
-
-            with colA:
-                st.markdown("### 🔴 Levels from Top")
-                st.caption(f"Major High: {h:.2f} ({h_dt})")
-                lev_h = calculate_gann_levels(h)
-
-                c1, c2 = st.columns(2)
-                c1.metric("Resistance (360°)", f"{lev_h[8]:.2f}")
-                c2.metric("Support (90°)", f"{lev_h[2]:.2f}")
-                st.metric("Support (180°)", f"{lev_h[1]:.2f}")
-
-            with colB:
-                st.markdown("### 🟢 Levels from Bottom")
-                st.caption(f"Major Low: {l:.2f} ({l_dt})")
-                lev_l = calculate_gann_levels(l)
-
-                c3, c4 = st.columns(2)
-                c3.metric("Resistance (180°)", f"{lev_l[7]:.2f}")
-                c4.metric("Resistance (360°)", f"{lev_l[8]:.2f}")
-                st.metric("Major Support", f"{lev_l[4]:.2f}")
-
-            st.divider()
-            st.subheader("⏳ Gann Time Cycles (Watch Dates)")
-            start = datetime.strptime(h_dt, "%Y-%m-%d")
-            dates = []
-            for d in [45, 90, 144, 180, 360]:
-                fd = start + timedelta(days=d)
-                if fd > datetime.now():
-                    dates.append(f"**{d} Days:** {fd.strftime('%d %b %Y')}")
-            for d in dates:
-                st.write(d)
+            lev_h, lev_l = calculate_gann_levels(h), calculate_gann_levels(l)
+            c1, c2 = st.columns(2)
+            c1.metric("Res (360)", f"{lev_h[8]:.2f}")
+            c1.metric("Sup (90)", f"{lev_h[2]:.2f}")
+            c2.metric("Res (180)", f"{lev_l[7]:.2f}")
+            c2.metric("Sup (Base)", f"{lev_l[4]:.2f}")
 
 # TAB 7: HEATMAP
 with tabs[6]:
-    st.subheader("🗺️ Market Heatmap")
     lists = {
         "Nifty 50": [
             "RELIANCE",
@@ -362,110 +310,195 @@ with tabs[6]:
             "SBIN",
             "LICI",
             "HINDUNILVR",
-            "LT",
-            "BAJFINANCE",
-            "HCLTECH",
-            "MARUTI",
-            "SUNPHARMA",
-            "ADANIENT",
-            "KOTAKBANK",
-            "TITAN",
-            "TATAMOTORS",
-            "ONGC",
-            "AXISBANK",
-            "NTPC",
-            "ULTRACEMCO",
-            "POWERGRID",
-            "ADANIPORTS",
-            "M&M",
-            "WIPRO",
-            "COALINDIA",
-            "BAJAJ-AUTO",
-            "ASIANPAINT",
-            "JSWSTEEL",
-            "NESTLEIND",
-            "GRASIM",
-            "LTIM",
-            "SBILIFE",
-            "TECHM",
-            "HDFCLIFE",
-            "BSOFT",
-            "CIPLA",
-            "TATASTEEL",
-            "EICHERMOT",
-            "DIVISLAB",
-            "DRREDDY",
-            "HEROMOTOCO",
-            "TATACONSUM",
-            "APOLLOHOSP",
-            "BPCL",
-            "BRITANNIA",
-            "INDUSINDBK",
         ],
-        "Nifty Bank": [
-            "HDFCBANK",
-            "ICICIBANK",
-            "SBIN",
-            "KOTAKBANK",
-            "AXISBANK",
-            "INDUSINDBK",
-            "BANKBARODA",
-            "PNB",
-            "IDFCFIRSTB",
-            "AUBANK",
-        ],
-        "Nifty IT": [
-            "TCS",
-            "INFY",
-            "HCLTECH",
-            "WIPRO",
-            "TECHM",
-            "LTIM",
-            "PERSISTENT",
-            "COFORGE",
-            "MPHASIS",
-            "LTTS",
-        ],
+        "Bank Nifty": ["HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK"],
     }
     sel = st.selectbox("View:", list(lists.keys()))
     if st.button("Generate Map"):
         ticks = [fix_ticker(x) for x in lists[sel]]
-        with st.spinner("Building Map..."):
-            data = get_stock_data(ticks, "5d", "1d")
-            h_data = []
-            for t in ticks:
-                try:
-                    df = data[t]
-                    l_c = df["Close"].iloc[-1]
-                    p_c = df["Close"].iloc[-2]
-                    if l_c == 0 or np.isnan(l_c):
-                        l_c = df["Close"].iloc[-2]
-                        p_c = df["Close"].iloc[-3]
-                    pct = ((l_c - p_c) / p_c) * 100
-                    h_data.append(
-                        {
-                            "Ticker": t.replace(".NS", ""),
-                            "Change": pct,
-                            "Price": l_c,
-                            "Label": f"{t.replace('.NS','')}\n{pct:.2f}%",
-                        }
+        data = get_stock_data(ticks, "5d", "1d")
+        h_data = []
+        for t in ticks:
+            try:
+                df = data[t]
+                l_c = df["Close"].iloc[-1]
+                p_c = df["Close"].iloc[-2]
+                if l_c == 0 or np.isnan(l_c):
+                    l_c = df["Close"].iloc[-2]
+                    p_c = df["Close"].iloc[-3]
+                pct = ((l_c - p_c) / p_c) * 100
+                h_data.append(
+                    {
+                        "Ticker": t.replace(".NS", ""),
+                        "Change": pct,
+                        "Price": l_c,
+                        "Label": f"{t.replace('.NS','')}\n{pct:.2f}%",
+                    }
+                )
+            except:
+                pass
+        if h_data:
+            fig = px.treemap(
+                pd.DataFrame(h_data),
+                path=["Ticker"],
+                values="Price",
+                color="Change",
+                color_continuous_scale=["#FF0000", "#121212", "#00FF00"],
+                color_continuous_midpoint=0,
+            )
+            fig.update_traces(
+                textinfo="label+text",
+                texttemplate="%{label}",
+                textposition="middle center",
+                textfont=dict(size=14, color="white"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+# TAB 8: CORPORATE LIFECYCLE (Complete)
+with tabs[7]:
+    st.subheader("🧬 Corporate Lifecycle Matrix")
+    mode = st.radio(
+        "Mode:", ["Compare Sector (Group)", "Analyze Individual Stock"], horizontal=True
+    )
+
+    if mode == "Compare Sector (Group)":
+        lists_lc = {
+            "Nifty 50": [
+                "RELIANCE",
+                "TCS",
+                "HDFCBANK",
+                "INFY",
+                "ITC",
+                "SBIN",
+                "TATAMOTORS",
+                "SUNPHARMA",
+                "TITAN",
+                "BAJFINANCE",
+                "ASIANPAINT",
+                "MARUTI",
+                "ZOMATO",
+                "ADANIENT",
+            ],
+            "Auto Sector": [
+                "TATAMOTORS",
+                "M&M",
+                "MARUTI",
+                "BAJAJ-AUTO",
+                "EICHERMOT",
+                "TVSMOTOR",
+                "HEROMOTOCO",
+            ],
+            "IT Sector": [
+                "TCS",
+                "INFY",
+                "HCLTECH",
+                "WIPRO",
+                "TECHM",
+                "LTIM",
+                "PERSISTENT",
+            ],
+            "Custom": [],
+        }
+        sel_list = st.selectbox("Select Group:", list(lists_lc.keys()))
+        if sel_list == "Custom":
+            custom_txt = st.text_area(
+                "Enter Tickers (comma separated):", "ZOMATO, PAYTM, NYKAA, IDEA"
+            )
+            ticks = [fix_ticker(x) for x in custom_txt.split(",")]
+        else:
+            ticks = [fix_ticker(x) for x in lists_lc[sel_list]]
+
+        if st.button("Generate Matrix"):
+            with st.spinner("Analyzing Financials..."):
+                df_life = fetch_financial_metrics(ticks)
+                if not df_life.empty:
+                    conditions = [
+                        (df_life["Rev Growth (%)"] > 15)
+                        & (df_life["Profit Margin (%)"] < 5),
+                        (df_life["Rev Growth (%)"] > 10)
+                        & (df_life["Profit Margin (%)"] > 10),
+                        (df_life["Rev Growth (%)"] < 10)
+                        & (df_life["Profit Margin (%)"] > 15),
+                        (df_life["Rev Growth (%)"] < 5)
+                        & (df_life["Profit Margin (%)"] < 5),
+                    ]
+                    choices = [
+                        "🚀 Aggressive Growth",
+                        "⭐ Prime Champions",
+                        "🏰 Mature Cash Cows",
+                        "📉 Laggards",
+                    ]
+                    df_life["Zone"] = np.select(
+                        conditions, choices, default="⚖️ Average"
                     )
-                except:
-                    pass
-            if h_data:
-                fig = px.treemap(
-                    pd.DataFrame(h_data),
-                    path=["Ticker"],
-                    values="Price",
-                    color="Change",
-                    color_continuous_scale=["#FF0000", "#121212", "#00FF00"],
-                    color_continuous_midpoint=0,
-                )
-                fig.update_traces(
-                    textinfo="label+text",
-                    texttemplate="%{label}",
-                    textposition="middle center",
-                    textfont=dict(size=14, color="white"),
-                )
-                fig.update_layout(height=650, margin=dict(t=30, l=10, r=10, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+
+                    fig = px.scatter(
+                        df_life,
+                        x="Profit Margin (%)",
+                        y="Rev Growth (%)",
+                        size="Size",
+                        color="Zone",
+                        text="Ticker",
+                        color_discrete_map={
+                            "🚀 Aggressive Growth": "#00CCFF",
+                            "⭐ Prime Champions": "#00FF00",
+                            "🏰 Mature Cash Cows": "#FFD700",
+                            "📉 Laggards": "#FF0000",
+                            "⚖️ Average": "#808080",
+                        },
+                    )
+                    fig.add_hline(y=10, line_dash="dot", line_color="gray")
+                    fig.add_vline(x=10, line_dash="dot", line_color="gray")
+                    fig.update_traces(
+                        textposition="top center", textfont=dict(size=13, color="white")
+                    )
+                    fig.update_layout(
+                        plot_bgcolor="#0e1117",
+                        paper_bgcolor="#0e1117",
+                        font=dict(color="#FAFAFA"),
+                        height=600,
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+    else:  # INDIVIDUAL STOCK MODE
+        st.markdown("### 🕵️ Single Stock Deep Dive")
+        single_ticker = st.text_input("Enter Stock Name:", "ZOMATO")
+        if st.button("Analyze Stock Identity"):
+            t = fix_ticker(single_ticker)
+            with st.spinner(f"X-Raying {t}..."):
+                df_single = fetch_financial_metrics([t])
+                if not df_single.empty:
+                    row = df_single.iloc[0]
+                    rg = row["Rev Growth (%)"]
+                    pm = row["Profit Margin (%)"]
+
+                    zone = "⚖️ Average"
+                    desc = "Standard performance."
+                    color = "gray"
+                    if rg > 15 and pm < 5:
+                        zone = "🚀 Aggressive Growth (Disruptor)"
+                        desc = "High Growth, Low Profit. Betting on Future."
+                        color = "blue"
+                    elif rg > 10 and pm > 10:
+                        zone = "⭐ Prime Champion (Star)"
+                        desc = "The Holy Grail. Growing fast AND profitable."
+                        color = "green"
+                    elif rg < 10 and pm > 15:
+                        zone = "🏰 Mature Cash Cow (Stable)"
+                        desc = "Slow growth but huge profits. Dividend Payer."
+                        color = "orange"
+                    elif rg < 5 and pm < 5:
+                        zone = "📉 Laggard (Danger)"
+                        desc = "Declining growth and low margins. Avoid."
+                        color = "red"
+
+                    st.divider()
+                    c1, c2 = st.columns([1, 2])
+                    with c1:
+                        st.metric("Revenue Growth", f"{rg:.2f}%")
+                        st.metric("Profit Margin", f"{pm:.2f}%")
+                    with c2:
+                        st.markdown(f"## :{color}[{zone}]")
+                        st.info(f"**Verdict:** {desc}")
+                else:
+                    st.error("Could not fetch data.")
